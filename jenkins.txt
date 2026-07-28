@@ -1,0 +1,737 @@
+
+pipeline {
+
+    agent {
+        label "${params.BUILD_NODE}"
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    } 
+
+parameters {
+
+    choice(
+        name: 'BUILD_NODE',
+        choices: [
+            'infineon_aws_portal_slave'
+        ],
+        description: 'Select Jenkins Agent'
+    )
+
+        choice(
+            name: 'SOURCE_TYPE',
+            choices: [
+                'BRANCH',
+                'TAG'
+            ],
+            description: 'Clone from BRANCH or TAG'
+        )
+
+    choice(
+        name: 'TAG_ACTION',
+        choices: [
+            'CREATE',
+            'DELETE_AND_CREATE'
+        ],
+        description: 'DELETE_AND_CREATE or CREATE, Create a new tag or delete the existing tag and recreate it'
+    )
+
+    /***************************************************
+     * SERVICE REPOSITORY
+     ***************************************************/
+    string(
+        name: 'SERVICE_BRANCH',
+        defaultValue: 'Release',
+        description: 'Service Repository Branch'
+    )
+
+    string(
+        name: 'SERVICE_TAG',
+        defaultValue: '',
+        description: 'Service AWS Tag' 
+    )
+
+    string(
+        name: 'LOCAL_SERVICE_TAG', 
+        defaultValue: '',
+        description: 'Local PERF Service Tag' 
+    )
+
+    /***************************************************
+     * DOCUMENT REPOSITORY
+     ***************************************************/
+    string(
+        name: 'DB_BRANCH',
+        defaultValue: 'Release',
+        description: 'Document Repository Branch'
+    )
+
+    string(
+        name: 'DB_TAG',
+        defaultValue: '',
+        description: 'Document AWS Tag'
+    ) 
+
+    string(
+        name: 'LOCAL_DB_TAG',
+        defaultValue: '',
+        description: 'Local PERF DB Tag'
+    )
+
+    /***************************************************
+     * VERSION
+     ***************************************************/
+    string(
+        name: 'VERSION',
+        defaultValue: '5.0.0',
+        description: 'Application Version'
+    )
+
+    string(
+        name: 'MILESTONE',
+        defaultValue: '1',
+        description: 'Release Milestone'
+    )
+}
+    environment { 
+
+        /***************************************************
+         * SERVICE DETAILS
+         ***************************************************/
+        SERVICE_NAME = "secora_token_cloud_config"
+
+        SERVICE_REPO = "http://3dbfd1d21c64acda26b2c9ab353a781084a92153@gitea.girmiti.in:3000/IFX-token-requestor-server/secora_token_cloud_config.git"
+
+        DOCUMENT_REPO = "http://3dbfd1d21c64acda26b2c9ab353a781084a92153@gitea.girmiti.in:3000/IFX-token-requestor-server/secora_token_requestor_server_document_and_db_script.git"
+
+        DEVOPS_REPO = "http://3dbfd1d21c64acda26b2c9ab353a781084a92153@gitea.girmiti.in:3000/IFX-Wallet-Server/secora_devops_scripts.git"
+
+        DEPLOYMENT_FOLDER = "secora-token-requestor/deployment/automation/secora_token_cloud_config"
+
+        PORT = "9090"
+
+        HEALTH_ENDPOINT = "/tr-cloudconfig-server/actuator/health"
+
+        /***************************************************
+         * DEPLOYMENT SERVER
+         ***************************************************/
+        DEPLOY_USER = "infineon"
+
+        DEPLOY_HOST = "192.168.0.173"
+
+        DEPLOY_PORT = "6090"
+
+        SSH_KEY = "/home/infineon/.ssh/performance-testing"
+
+        REMOTE_DIR = "/home/infineon/application/secora_token_cloud_config"
+
+    }
+
+    stages {
+        
+
+stage('Validate Parameters') {
+
+    steps {
+
+        script {
+
+            if (params.SOURCE_TYPE == "BRANCH") {
+
+                if (!params.SERVICE_BRANCH.trim())
+                    error("SERVICE_BRANCH is mandatory")
+
+                if (!params.DB_BRANCH.trim())
+                    error("DB_BRANCH is mandatory")
+
+            } else {
+
+                if (!params.SERVICE_TAG.trim())
+                    error("SERVICE_TAG is mandatory")
+
+                if (!params.DB_TAG.trim())
+                    error("DB_TAG is mandatory")
+            }
+
+            // Local tags are ALWAYS required
+
+            if (!params.LOCAL_SERVICE_TAG.trim())
+                error("LOCAL_SERVICE_TAG is mandatory")
+
+            if (!params.LOCAL_DB_TAG.trim())
+                error("LOCAL_DB_TAG is mandatory")
+
+            echo "========================================="
+            echo "SERVICE            : ${SERVICE_NAME}"
+            echo "SOURCE TYPE        : ${params.SOURCE_TYPE}"
+            echo "SERVICE BRANCH     : ${params.SERVICE_BRANCH}"
+            echo "DB BRANCH          : ${params.DB_BRANCH}"
+            echo "SERVICE AWS TAG    : ${params.SERVICE_TAG}"
+            echo "DB AWS TAG         : ${params.DB_TAG}"
+            echo "LOCAL SERVICE TAG  : ${params.LOCAL_SERVICE_TAG}"
+            echo "LOCAL DB TAG       : ${params.LOCAL_DB_TAG}"
+            echo "========================================="
+        }
+    }
+}
+
+stage('Create Local Tags') {
+
+    steps {
+
+        sh '''
+#!/bin/bash
+set -e
+
+create_local_tag() {
+
+    REPO=$1
+    BRANCH=$2
+    AWS_TAG=$3
+    LOCAL_TAG=$4
+
+    echo "======================================"
+    echo "Repository : $REPO"
+    echo "Branch     : $BRANCH"
+    echo "AWS Tag    : $AWS_TAG"
+    echo "Local Tag  : $LOCAL_TAG"
+    echo "Tag Action : $TAG_ACTION"
+    echo "======================================"
+
+    rm -rf temp_repo
+
+    git clone "$REPO" temp_repo
+
+    cd temp_repo
+
+    git fetch --all --tags
+
+    git config user.name "Jenkins"
+    git config user.email "jenkins@girmiti.in"
+
+    TAG_EXISTS=false
+
+    if git ls-remote --tags origin | grep -q "refs/tags/${LOCAL_TAG}$"
+    then
+        TAG_EXISTS=true
+    fi
+
+    #######################################################
+    # DELETE EXISTING TAG (IF REQUIRED)
+    #######################################################
+
+    if [ "$TAG_ACTION" = "DELETE_AND_CREATE" ]
+    then
+
+        if [ "$TAG_EXISTS" = true ]
+        then
+
+            echo "Deleting Remote Tag : $LOCAL_TAG"
+
+            git push origin --delete "$LOCAL_TAG" || true
+
+            echo "Deleting Local Tag : $LOCAL_TAG"
+
+            git tag -d "$LOCAL_TAG" || true
+
+            git fetch --prune --tags
+
+        else
+
+            echo "Tag does not exist. Creating new tag."
+
+        fi
+
+else
+
+    if [ "$TAG_EXISTS" = true ]
+    then
+
+        echo "======================================"
+        echo "Tag already exists."
+        echo "Skipping tag creation."
+        echo "Checking out existing tag : $LOCAL_TAG"
+        echo "======================================"
+
+        git checkout "$LOCAL_TAG"
+
+        cd .. 
+        rm -rf temp_repo 
+
+        return
+
+    fi
+fi
+    #######################################################
+    # CHECKOUT SOURCE
+    #######################################################
+
+    if [ "$SOURCE_TYPE" = "BRANCH" ]
+    then
+
+        echo "Checking out Branch : $BRANCH"
+
+        git checkout "$BRANCH"
+
+    else
+
+        echo "Checking out AWS Tag : $AWS_TAG"
+
+        git checkout "$AWS_TAG"
+
+    fi
+
+    #######################################################
+    # CREATE LOCAL TAG
+    #######################################################
+
+    echo "Creating Local Tag : $LOCAL_TAG"
+
+    git tag -a "$LOCAL_TAG" -m "Created from Jenkins"
+
+    git push origin "$LOCAL_TAG"
+
+    cd ..
+
+    rm -rf temp_repo
+
+    echo "======================================"
+
+}
+
+########################################################
+# SERVICE REPOSITORY
+########################################################
+
+create_local_tag \
+"$SERVICE_REPO" \
+"$SERVICE_BRANCH" \
+"$SERVICE_TAG" \
+"$LOCAL_SERVICE_TAG"
+
+########################################################
+# DOCUMENT REPOSITORY
+########################################################
+
+create_local_tag \
+"$DOCUMENT_REPO" \
+"$DB_BRANCH" \
+"$DB_TAG" \
+"$LOCAL_DB_TAG"
+
+echo
+echo "======================================"
+echo "Local Tag Creation Completed"
+echo "======================================"
+
+'''
+    }
+}
+stage('Git Clone') {
+
+    steps {
+
+        sh '''
+#!/bin/bash
+set -e
+
+echo "========================================="
+echo "Cleaning Workspace..."
+echo "========================================="
+
+rm -rf secora_token_cloud_config
+rm -rf secora_token_requestor_server_document_and_db_script
+rm -rf secora_devops_scripts
+
+echo
+echo "========================================="
+echo "Cloning Service Repository..."
+echo "========================================="
+
+git clone \
+-b ${LOCAL_SERVICE_TAG} \
+${SERVICE_REPO}
+
+echo
+echo "========================================="
+echo "Cloning Document Repository..."
+echo "========================================="
+
+git clone \
+-b ${LOCAL_DB_TAG} \
+${DOCUMENT_REPO}
+
+echo
+echo "========================================="
+echo "Cloning DevOps Repository..."
+echo "========================================="
+
+git clone \
+-b Release \
+${DEVOPS_REPO}
+
+echo
+echo "========================================="
+echo "Repository Details"
+echo "========================================="
+
+echo
+echo "Service Repository"
+
+cd secora_token_cloud_config
+git log -1 --oneline
+git describe --tags
+cd ..
+
+echo
+echo "Document Repository"
+
+cd secora_token_requestor_server_document_and_db_script
+git log -1 --oneline
+git describe --tags
+cd ..
+
+echo
+echo "DevOps Repository"
+
+cd secora_devops_scripts
+git log -1 --oneline
+cd ..
+
+echo
+echo "========================================="
+echo "Git Clone Completed"
+echo "========================================="
+
+'''
+    }
+
+}
+stage('Build Application') {
+
+            steps {
+
+                sh '''
+#!/bin/bash
+set -e
+
+echo "========================================="
+echo "Building ${SERVICE_NAME}"
+echo "========================================="
+
+export JAVA_HOME=/usr/lib/jvm/temurin-17-jdk-amd64
+export PATH=$JAVA_HOME/bin:$PATH
+
+java -version
+mvn -version
+export PATH=$JAVA_HOME/bin:$PATH
+
+cd ${SERVICE_NAME}
+
+echo "Updating Config Server Location..."
+
+sed -i 's|spring.cloud.config.server.native.searchLocations=/home/infineon/application/secora_token_requestor_server_document_and_db_script/server-config|spring.cloud.config.server.native.searchLocations=/opt/app/server-config|' \
+src/main/resources/application.properties
+
+echo "Updating Version..."
+
+mvn versions:set \
+versions:set-property \
+-DnewVersion=${VERSION} \
+-Dproperty=release-version \
+-DprocessAllModules \
+-DgenerateBackupPoms=false
+
+echo "Running Maven Build..."
+
+mvn clean install -Dmaven.test.skip=true
+
+echo
+echo "Generated Artifact"
+
+cd target
+
+ls -lh
+
+md5sum *.jar
+
+echo
+echo "========================================="
+echo "Build Completed Successfully"
+echo "========================================="
+
+'''
+            }
+
+        }
+                stage('Prepare Docker Context') {
+
+            steps {
+
+                sh '''
+#!/bin/bash
+set -e
+
+echo "========================================="
+echo "Preparing Docker Build Context"
+echo "========================================="
+
+DEPLOY_DIR=secora_devops_scripts/${DEPLOYMENT_FOLDER}
+
+echo "Cleaning old artifacts..."
+
+rm -f ${DEPLOY_DIR}/secora-*.jar
+
+rm -rf ${DEPLOY_DIR}/server-config
+
+echo "Copying server-config..."
+
+cp -r \
+secora_token_requestor_server_document_and_db_script/server-config \
+${DEPLOY_DIR}/
+
+echo "Copying Application Jar..."
+
+cp \
+${SERVICE_NAME}/target/*.jar \
+${DEPLOY_DIR}/
+
+echo
+echo "Docker Context"
+
+ls -lh ${DEPLOY_DIR}
+
+echo
+echo "========================================="
+echo "Docker Context Ready"
+echo "========================================="
+
+'''
+            }
+
+        }
+        stage('Verify Deployment Files') {
+
+    steps {
+
+        sh '''
+#!/bin/bash
+
+echo "========================================="
+
+DEPLOY_DIR=secora_devops_scripts/${DEPLOYMENT_FOLDER}
+
+echo "Deployment Directory"
+
+pwd
+
+echo
+
+ls -R ${DEPLOY_DIR}
+
+echo
+
+echo "Jar File"
+
+ls -lh ${DEPLOY_DIR}/secora-*.jar
+
+echo
+
+echo "Dockerfile"
+
+ls -lh ${DEPLOY_DIR}/Dockerfile
+
+echo
+
+echo "Startup Script"
+
+ls -lh ${DEPLOY_DIR}/startupd.sh
+
+echo
+
+echo "Server Config"
+
+ls -R ${DEPLOY_DIR}/server-config
+
+echo "========================================="
+
+'''
+
+    }
+
+}
+        stage('Deploy to Local Server') {
+
+            steps {
+
+                sh '''
+#!/bin/bash
+set -e
+
+DEPLOY_DIR=secora_devops_scripts/${DEPLOYMENT_FOLDER}
+
+echo "========================================="
+echo "Creating Remote Directory..."
+echo "========================================="
+
+ssh \
+-i ${SSH_KEY} \
+-p ${DEPLOY_PORT} \
+-o StrictHostKeyChecking=no \
+${DEPLOY_USER}@${DEPLOY_HOST} \
+"mkdir -p ${REMOTE_DIR}"
+
+echo "========================================="
+echo "Copying Files..."
+echo "========================================="
+
+rsync -avz --delete \
+-e "ssh -i ${SSH_KEY} -p ${DEPLOY_PORT} -o StrictHostKeyChecking=no" \
+${DEPLOY_DIR}/ \
+${DEPLOY_USER}@${DEPLOY_HOST}:${REMOTE_DIR}/
+
+echo "========================================="
+echo "Docker Deployment Started..."
+echo "========================================="
+
+ssh \
+-i ${SSH_KEY} \
+-p ${DEPLOY_PORT} \
+-o StrictHostKeyChecking=no \
+${DEPLOY_USER}@${DEPLOY_HOST} "
+
+set -e
+
+cd ${REMOTE_DIR}
+
+echo 'Current Directory'
+
+pwd
+
+echo
+
+echo 'Docker Build'
+
+docker build \
+-t ${SERVICE_NAME}:${VERSION}-${BUILD_NUMBER} .
+
+echo
+
+echo 'Stopping Existing Container'
+
+docker stop ${SERVICE_NAME} || true
+
+echo
+
+echo 'Removing Existing Container'
+
+docker rm ${SERVICE_NAME} || true
+
+echo
+
+echo 'Starting Container'
+
+docker run -d \
+--restart unless-stopped \
+--name ${SERVICE_NAME} \
+-p ${PORT}:${PORT} \
+-v /home/infineon/volume/${SERVICE_NAME}/logs:/opt/app/logs \
+--log-driver json-file \
+--log-opt max-size=100m \
+--log-opt max-file=10 \
+${SERVICE_NAME}:${VERSION}-${BUILD_NUMBER}
+
+echo
+
+docker ps
+
+"
+
+'''
+            }
+
+        }
+                stage('Health Check') {
+
+            steps {
+
+                sh '''
+#!/bin/bash
+set -e
+
+echo "========================================="
+echo "Checking Application Health..."
+echo "========================================="
+
+ssh \
+-i ${SSH_KEY} \
+-p ${DEPLOY_PORT} \
+-o StrictHostKeyChecking=no \
+${DEPLOY_USER}@${DEPLOY_HOST} '
+
+COUNT=1
+
+while [ $COUNT -le 12 ]
+do
+
+    if curl -fs http://localhost:'"${PORT}${HEALTH_ENDPOINT}"' >/dev/null 2>&1
+    then
+
+        echo
+        echo "Application Started Successfully."
+
+        exit 0
+
+    fi
+
+    echo "Attempt $COUNT / 12"
+
+    COUNT=$((COUNT+1))
+
+    sleep 5
+
+done
+
+echo
+
+echo "Health Check Failed"
+
+exit 1
+
+'
+
+'''
+            }
+
+        }
+    }
+
+    post {
+
+        success {
+
+            echo '''
+=========================================
+Deployment Completed Successfully
+=========================================
+'''
+        }
+
+        failure {
+
+            echo '''
+=========================================
+Deployment Failed
+=========================================
+'''
+        }
+
+
+
+    }
+
+}
+
