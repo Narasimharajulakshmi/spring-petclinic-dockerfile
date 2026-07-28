@@ -8,3 +8,4 @@ EXPOSE 8080
 
 ENTRYPOINT ["java","-jar","app.jar"]
 https://chatgpt.com/share/6a6761d1-3c90-83ee-9f15-193349ad4963
+https://chatgpt.com/share/6a689dcd-bf4c-83e8-b8d7-bdee685bd325
