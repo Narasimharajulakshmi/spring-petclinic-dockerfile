@@ -1,0 +1,261 @@
+pipeline {
+    agent { 
+        label 'infineon_android'
+    }
+
+    environment {
+        JAVA_HOME    = "/usr/lib/jvm/java-21-openjdk-amd64"
+        ANDROID_SDK  = "/home/infineon/android-sdk"
+        GIT_URL      = "http://3dbfd1d21c64acda26b2c9ab353a781084a92153@gitea.girmiti.in:3000/IFX-Android/IFX_wallet_android.git"
+
+        // Same token already used above to clone/tag the IFX_wallet_android repo
+        GITEA_TOKEN  = "3dbfd1d21c64acda26b2c9ab353a781084a92153"
+        GITEA_URL    = "http://gitea.girmiti.in:3000"
+        GITEA_OWNER  = "IFX-Android"
+        GITEA_REPO   = "IFX_wallet_android"
+    }
+
+    parameters {
+        choice(
+            name: 'BUILD_MODE',
+            choices: ['BRANCH', 'TAG'],
+            description: 'Build using Branch or Tag'
+        )
+
+        choice(
+            name: 'CREATE_TAG',
+            choices: ['NO', 'YES'],
+            description: 'Create new release tag?'
+        )
+
+        string(name: 'BRANCH', defaultValue: 'develop', description: 'Branch name')
+        string(name: 'release_tag', defaultValue: 'Infineon_v1.0', description: 'Tag name')
+        string(name: 'sdkVersionName', defaultValue: '1.0.0', description: 'SDK version')
+        string(name: 'apk_version', defaultValue: '1.0', description: 'APK version')
+    }
+
+    stages {
+
+        // =========================
+        // 🔥 CREATE TAG (OPTIONAL)
+        // =========================
+stage("Create Release Tag") {
+    when {
+        expression { params.CREATE_TAG == 'YES' }
+    }
+    steps {
+        sh '''
+        set -e
+
+        rm -rf tag_repo
+
+        git config --global user.email "jenkins@girmiti.in"
+        git config --global user.name "jenkins"
+
+        echo "🚀 Cloning branch for tag creation..."
+        git clone -b ${BRANCH} ${GIT_URL} tag_repo
+
+        cd tag_repo
+
+        echo "🔍 Checking if tag ${release_tag} exists..."
+
+        if git ls-remote --tags origin | grep -q "refs/tags/${release_tag}$"; then
+            echo "⚠️ Tag ${release_tag} already exists. Deleting it..."
+
+            # Delete local tag if it exists
+            git tag -d ${release_tag} 2>/dev/null || true
+
+            # Delete remote tag
+            git push origin --delete ${release_tag}
+
+            echo "✅ Existing tag deleted."
+        else
+            echo "✅ Tag does not exist."
+        fi
+
+        echo "🏷️ Creating tag ${release_tag}..."
+        git tag -a ${release_tag} -m "Release ${release_tag}"
+
+        echo "📤 Pushing tag..."
+        git push origin ${release_tag}
+
+        cd ..
+        rm -rf tag_repo
+        '''
+    }
+}
+        // =========================
+        // 🔥 CLONE
+        // =========================
+        stage("Clone Repository") {
+            steps {
+                script {
+                    sh "rm -rf IFX_wallet_android"
+
+                    if (params.BUILD_MODE == 'BRANCH') {
+                        echo "🚀 Building from BRANCH: ${params.BRANCH}"
+                        sh "git clone -b ${params.BRANCH} ${GIT_URL}"
+                    } else {
+                        echo "🏷️ Building from TAG: ${params.release_tag}"
+                        sh "git clone -b ${params.release_tag} ${GIT_URL}"
+                    }
+                }
+            }
+        }
+
+        stage("Update Build Info") {
+            steps {
+                sh '''
+                dir=$(pwd)
+                cd IFX_wallet_android
+                echo "\\nCommit: $(git rev-parse HEAD)" >> "$dir/infineon-${sdkVersionName}-release.txt"
+                echo "Branch/Tag: $(git rev-parse --abbrev-ref HEAD)" >> "$dir/infineon-${sdkVersionName}-release.txt"
+                '''
+            }
+        }
+
+        // =========================
+        // 🔥 BUILD SDK
+        // =========================
+        stage("Build SDK (AAR)") {
+            steps {
+                sh '''
+                cd IFX_wallet_android
+                export JAVA_HOME=${JAVA_HOME}
+
+                chmod +x gradlew
+                dos2unix gradlew
+
+                echo sdk.dir=${ANDROID_SDK} > local.properties
+                echo ndk.dir=${ANDROID_SDK}/ndk-bundle >> local.properties
+
+                echo "📦 Building SDK..."
+                ./gradlew :SecoraWalletSDK:assembleRelease || true
+                ./gradlew :SecoraWearableSDK:assembleRelease || true
+                '''
+            }
+        }
+
+        // =========================
+        // 🔥 COPY AAR
+        // =========================
+        stage("Copy SDK to libs") {
+            steps {
+                sh '''
+                set -e
+                dir=$(pwd)
+
+                LIB_DIR="$dir/IFX_wallet_android/app/libs"
+                WALLET_AAR="$dir/IFX_wallet_android/SecoraWalletSDK/build/outputs/aar"
+                WEARABLE_AAR="$dir/IFX_wallet_android/SecoraWearableSDK/build/outputs/aar"
+
+                mkdir -p "$LIB_DIR"
+                rm -rf "$LIB_DIR"/*.aar
+
+                cp "$WALLET_AAR"/*.aar "$LIB_DIR/" 2>/dev/null || true
+                cp "$WEARABLE_AAR"/*.aar "$LIB_DIR/" 2>/dev/null || true
+
+                echo "✅ AAR copied"
+                ls -ltr "$LIB_DIR"
+                '''
+            }
+        }
+
+        // =========================
+        // 🔥 BUILD APK
+        // =========================
+        stage("Build APK") {
+            steps {
+                sh '''
+                cd IFX_wallet_android
+                export JAVA_HOME=${JAVA_HOME}
+
+                echo "🚀 Building APK..."
+                ./gradlew clean assembleRelease
+                '''
+            }
+        }
+
+        // =========================
+        // 🔥 UPLOAD TO GITEA RELEASE
+        // =========================
+        stage("Create Gitea Release") {
+            steps {
+                sh '''
+                curl -sS -X POST \
+                  -H "Authorization: token ${GITEA_TOKEN}" \
+                  -H "Content-Type: application/json" \
+                  -d "{\\"tag_name\\": \\"${release_tag}\\", \\"name\\": \\"${release_tag}\\", \\"body\\": \\"Infineon wallet Android build ${BUILD_NUMBER}\\", \\"draft\\": false, \\"prerelease\\": false}" \
+                  "${GITEA_URL}/api/v1/repos/${GITEA_OWNER}/${GITEA_REPO}/releases"
+                '''
+            }
+        }
+
+        stage("Upload to Gitea") {
+            steps {
+                sh '''
+                APK_DIR="IFX_wallet_android/app/build/outputs/apk/release"
+
+                release_id=$(curl -sS -H "Authorization: token ${GITEA_TOKEN}" \
+                  "${GITEA_URL}/api/v1/repos/${GITEA_OWNER}/${GITEA_REPO}/releases/tags/${release_tag}" \
+                  | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
+
+                for apk in $APK_DIR/*.apk; do
+                    filename=$(basename "$apk")
+                    echo "Uploading $filename to Gitea release ${release_tag}..."
+                    curl -sS -X POST \
+                      -H "Authorization: token ${GITEA_TOKEN}" \
+                      -F "attachment=@${apk}" \
+                      "${GITEA_URL}/api/v1/repos/${GITEA_OWNER}/${GITEA_REPO}/releases/${release_id}/assets?name=${filename}"
+                done
+
+                dir=$(pwd)
+                buildinfo="$dir/infineon-${sdkVersionName}-release.txt"
+                if [ -f "$buildinfo" ]; then
+                    echo "Uploading build info txt..."
+                    curl -sS -X POST \
+                      -H "Authorization: token ${GITEA_TOKEN}" \
+                      -F "attachment=@${buildinfo}" \
+                      "${GITEA_URL}/api/v1/repos/${GITEA_OWNER}/${GITEA_REPO}/releases/${release_id}/assets?name=infineon-${sdkVersionName}-release.txt"
+                fi
+                '''
+            }
+        }
+    }
+
+    // =========================
+    // 📊 TRACKER
+    // =========================
+    post {
+        success {
+            script {
+                def masterDir = "/var/lib/jenkins/deployment-tracker"
+                def workspaceTrackerDir = "${env.WORKSPACE}/deployment-tracker"
+                def masterCsv = "${masterDir}/deployments.csv"
+
+                def dateTime = new Date().format("yyyy-MM-dd HH:mm:ss")
+                def serviceName = env.JOB_NAME.tokenize('/').last()
+                def buildNumber = env.BUILD_NUMBER
+
+                sh "mkdir -p ${masterDir}"
+
+                def mainGitRevision = sh(
+                    script: "cd ${env.WORKSPACE}/IFX_wallet_android && git rev-parse HEAD",
+                    returnStdout: true
+                ).trim()
+
+                sh """
+                if [ ! -f "${masterCsv}" ]; then
+                    echo "DateTime,ServiceName,BuildNumber,Branch,Version,Tag,Commit" > "${masterCsv}"
+                fi
+                """
+
+                sh """
+                echo "${dateTime},${serviceName},${buildNumber},${params.BRANCH},${params.apk_version},${params.release_tag},${mainGitRevision}" >> "${masterCsv}"
+                """
+
+                echo "✅ Deployment recorded"
+            }
+        }
+    }
+}
