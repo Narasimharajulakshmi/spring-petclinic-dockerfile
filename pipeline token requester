@@ -1,0 +1,38 @@
+pipeline {
+    agent { label "infineon_android"}
+    stages {
+      stage("Git-clone") {
+        steps {
+        sh '''
+            rm -rf *
+            git clone -b ${Branch_Name} http://3dbfd1d21c64acda26b2c9ab353a781084a92153@gitea.girmiti.in:3000/IFX-token-requestor-server/secora_token_requestor_service.git
+            echo $commit_id
+
+            '''
+            }
+         } 
+      stage("Build") {
+        steps {
+            sh '''
+                cd secora_token_requestor_service
+                 git log -4
+                export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+                mvn spotless:apply
+                mvn clean install -Dmaven.test.skip=true
+                cd target/
+                ls
+                md5sum *.jar               
+          '''
+            }
+         }
+      stage ("deployment on test server") {
+         steps {
+            sh '''
+                cd /home/infineon/Ansible
+                ansible-playbook secora_token_requestor_service_demo.yaml
+
+          '''
+            }
+      }
+    }
+}
