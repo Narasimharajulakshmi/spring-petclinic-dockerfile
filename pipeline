@@ -1,0 +1,36 @@
+pipeline {
+    agent { 
+        label "infineon_android"
+        }
+    stages {
+        stage('Git Clone') {
+            steps {
+                sh '''
+                rm -rf girmitiwebsite
+                git clone -b live-website-code http://b2f3d1dc844b737ad349d046ce72829728017f11@gitea.girmiti.in:3000/Websites/girmitiwebsite.git
+                '''
+            }
+        }
+        stage ('build') {
+            steps {
+                sh '''
+                cd girmitiwebsite/Girmiti.Com
+                node -v 
+                npm -v
+                npm i
+                ng build --configuration=production
+                #npm install 
+                #npm run build 
+                '''
+            }
+        }
+        stage ('zip artifacts ') {
+            steps {
+                sh '''
+                cd girmitiwebsite/Girmiti.Com
+                zip -r dist.zip dist
+                '''
+            }
+        }
+    }
+}
